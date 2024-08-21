@@ -11,6 +11,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from lib_gforce import gforce
+from lib_ohand import OHand, OHandProtocol
 
 
 NUM_FINGERS = 5
@@ -37,6 +38,9 @@ class Application:
     def __init__(self):
         signal.signal(signal.SIGINT, lambda signal, frame: self._signal_handler())
         self.terminated = False
+        self.hand = OHand(port="COM6",baudrate=115200,timeout=3)
+        self.hand.masterId = 0x01
+        self.hand.handId = 0x02
 
     def _signal_handler(self):
         print("You pressed ctrl-c, exit")
@@ -95,11 +99,11 @@ class Application:
 
         for i in range(NUM_FINGERS):
             print("MIN/MAX of finger {0}: {1}-{2}".format(i, emg_min[i], emg_max[i]))
-
+        cacheCount = 0
+        cacheData = [0,0,0,0,0]
         while not self.terminated:
             v = await q.get()
             # print(v)
-
             for i in range(len(v)):
                 emg_data[0] = round((emg_data[0] + v[i][7]) / 2)  # 拇指
                 emg_data[1] = round((emg_data[1] + v[i][6]) / 2)  # 食指
@@ -107,17 +111,25 @@ class Application:
                 emg_data[3] = round((emg_data[3] + v[i][3]) / 2)  # 无名指
                 emg_data[4] = round((emg_data[4] + v[i][4]) / 2)  # 小指
 
-                finger_data[0] = interpolate(emg_data[0], emg_min[0], emg_max[0], 0, 65535)
+                #finger_data[0] = interpolate(emg_data[0], emg_min[0], emg_max[0], 0, 65535)
                 finger_data[1] = interpolate(emg_data[1], emg_min[1], emg_max[1], 0, 65535)
                 finger_data[2] = interpolate(emg_data[2], emg_min[2], emg_max[2], 0, 65535)
                 finger_data[3] = interpolate(emg_data[3], emg_min[3], emg_max[3], 0, 65535)
                 finger_data[4] = interpolate(emg_data[4], emg_min[4], emg_max[4], 0, 65535)
 
-                finger_data[0] = clamp(finger_data[0], 0, 65535)
+                #finger_data[0] = clamp(finger_data[0], 0, 65535)
                 finger_data[1] = clamp(finger_data[1], 0, 65535)
                 finger_data[2] = clamp(finger_data[2], 0, 65535)
                 finger_data[3] = clamp(finger_data[3], 0, 65535)
                 finger_data[4] = clamp(finger_data[4], 0, 65535)
+                for idx in range(5):
+                    cacheData[idx] = cacheData[idx] + finger_data[idx]
+                cacheCount += 1
+                if cacheCount == 10:
+                    for fid in range(4):
+                        self.hand.SetFingerPos(fid+1, (65535 -int(cacheData[fid+1] / 10)), 250)
+                    cacheCount = 0
+                    cacheData = [0, 0, 0, 0, 0]
 
             print(finger_data)
 
