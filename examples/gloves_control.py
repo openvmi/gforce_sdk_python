@@ -3,15 +3,59 @@
 import asyncio
 import os
 import signal
-import socket
 import sys
-
+import json
+import queue
+import threading
 current_dir = os.path.dirname(os.path.realpath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from lib_gforce import gforce
 from lib_ohand import OHand, OHandProtocol
+import asyncio
+import websockets
+
+class Global:
+    ohandQueue = queue.Queue(maxsize=0)
+    recordQueue = queue.Queue(maxsize=0)
+    shouldRecord = False
+    currentGesture = 0
+CONNECTIONS = set()
+
+async def handle(websocket):
+    if websocket not in CONNECTIONS:
+        CONNECTIONS.add(websocket)
+    try:
+        async for message in websocket:
+            print(message)
+            jobj = json.loads(message)
+            methodName = jobj.get("method")
+            gestureId = jobj.get("gestureId")
+            if methodName == "startRecord" and gestureId is not None:
+                Global.shouldRecord = True
+                Global.currentGesture = gestureId
+            elif methodName == "stopRecord":
+                Global.shouldRecord = False
+    finally:
+        CONNECTIONS.remove(websocket)
+
+async def broadcast(queue):
+    while True:
+        message = await queue.get()
+        for websocket in CONNECTIONS.copy():
+            try:
+                data = {
+                    "method": "data.notify",
+                    "data": message
+                }
+                await websocket.send(json.dumps(data))
+            except websockets.ConnectionClosed:
+                pass
+
+async def mainServer():
+    async with websockets.serve(handle, "localhost", 8765):
+        await asyncio.Future()
 
 
 NUM_FINGERS = 5
@@ -38,15 +82,14 @@ class Application:
     def __init__(self):
         signal.signal(signal.SIGINT, lambda signal, frame: self._signal_handler())
         self.terminated = False
-        self.hand = OHand(port="COM6",baudrate=115200,timeout=3)
-        self.hand.masterId = 0x01
-        self.hand.handId = 0x02
 
     def _signal_handler(self):
         print("You pressed ctrl-c, exit")
         self.terminated = True
+        Global.recordQueue.put(None)
+        Global.ohandQueue.put(None)
 
-    async def main(self):
+    async def main(self,queue):
         gforce_device = gforce.GForce(DEV_NAME_PREFIX, DEV_MIN_RSSI)
         emg_data = [0 for _ in range(NUM_FINGERS)]
         emg_min = [0 for _ in range(NUM_FINGERS)]
@@ -54,10 +97,14 @@ class Application:
         finger_data = [0 for _ in range(NUM_FINGERS)]
 
         # GForce.connect() may get exception, but we just ignore for gloves
-        try:
-            await gforce_device.connect()
-        except Exception as e:
-            print(e)
+        isConnected = False
+        while isConnected is False:
+            try:
+                await gforce_device.connect()
+                isConnected = True
+            except Exception as e:
+                await asyncio.sleep(3)
+                print(e)
 
         if gforce_device.client == None or not gforce_device.client.is_connected:
             exit(-1)
@@ -126,17 +173,55 @@ class Application:
                     cacheData[idx] = cacheData[idx] + finger_data[idx]
                 cacheCount += 1
                 if cacheCount == 10:
-                    for fid in range(4):
-                        self.hand.SetFingerPos(fid+1, (65535 -int(cacheData[fid+1] / 10)), 250)
+                    Global.ohandQueue.put(cacheData)
                     cacheCount = 0
                     cacheData = [0, 0, 0, 0, 0]
-
-            print(finger_data)
-
+            queueData = finger_data.copy()
+            if Global.shouldRecord:
+                rdata = [Global.currentGesture]
+                rdata += queueData
+                Global.recordQueue.put(rdata)
+            await queue.put(queueData)
+        
         await gforce_device.stop_streaming()
         await gforce_device.disconnect()
 
+def OhandWorker():
+    hand = OHand(port="COM6",baudrate=115200,timeout=3,protocol=OHandProtocol.Serial)
+    hand.masterId = 0x01
+    hand.handId = 0x02
+    while True:
+        item = Global.ohandQueue.get()
+        if item is None:
+            print("OHand Work quit")
+            break
+        for fid in range(4):
+            hand.SetFingerPos(fid+1, (65535 -int(item[fid+1] / 10)), 250)
+
+import csv
+
+def DataRecorder():
+    while True:
+        with open("recorddata.csv", 'wt') as f:
+            writer = csv.writer(f)
+            writer.writerow(("gesture","f1", "f2","f3","f4","f5"))
+            while True:
+                item = Global.recordQueue.get()
+                if item is None:
+                    print("Data Recorder quit")
+                    return
+                print("recording...", item)
+                writer.writerow(item)
+        
+
+async def main():
+    app = Application()
+    queue = asyncio.Queue()
+    await asyncio.gather(app.main(queue), mainServer(),broadcast(queue))
 
 if __name__ == "__main__":
-    app = Application()
-    asyncio.run(app.main())
+    ohandThread = threading.Thread(target=OhandWorker, args=(),daemon=True)
+    dataRecordThread = threading.Thread(target=DataRecorder, args=(), daemon=True)
+    ohandThread.start()
+    dataRecordThread.start()
+    asyncio.run(main())

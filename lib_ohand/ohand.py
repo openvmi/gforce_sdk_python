@@ -51,7 +51,7 @@ class _SerialChannel:
                 try:
                     self._serial = serial.Serial(self._port, self._baudrate, timeout=self._timeout)
                 except serial.SerialException:
-                    print("[Error]: error in open serial channel")
+                    #print("[Error]: error in open serial channel")
                     return None
             try:
                 hasAttr = getattr(self._serial, 'flushInput', None)
@@ -61,7 +61,7 @@ class _SerialChannel:
                     self._serial.reset_input_buffer()
                 self._serial.write(command)
             except serial.SerialTimeoutException:
-                print("error about serial timeout")
+                #print("error about serial timeout")
                 raise
             endTime = int(time.time() * 1000) + timeout
             protocolParser.reset()
@@ -190,7 +190,8 @@ class OHand:
         outdata = generator.generate(cmdData)
         ret = self._dataChannel.SendAndWaitResponse(outdata, SerialProtocolParser(), 2000)
         if ret is None:
-            print("[Error]: Failed to get response")
+            pass
+            #print("[Error]: Failed to get response")
 
     def SetFingerPID(self,finger_id, p, i, d, j):
         payload = [finger_id]
